@@ -8,7 +8,7 @@ src:
 
 utils:	
 	cd utils && make
-	/bin/cp utils/costcheck bin/costcheck
+	/bin/mv utils/costcheck bin/costcheck
 
 	/bin/ln -fs  ../utils/qap.sh bin/qap.sh 
 	/bin/ln -fs  ../utils/verify_sol.sh  bin/verify_sol.sh 
