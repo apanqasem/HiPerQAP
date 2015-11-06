@@ -1,4 +1,12 @@
-all: 
+all: src utils 
+
+.PHONY: src
+.PHONY: utils
+
+src:
+	cd src && make
+
+utils:	
 	cd utils && make
 	/bin/cp utils/costcheck bin/costcheck
 
