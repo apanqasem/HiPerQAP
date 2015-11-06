@@ -1,0 +1,340 @@
+#include<iostream>
+#include<fstream>
+#include<stdio.h>
+#include<cstdlib>
+#include<qapio.h>
+#include<2optlib.h>
+
+using namespace std;
+
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+
+#define TABULISTSIZE 10
+
+inline void gpuAssert(cudaError_t code, char *file, int line, bool abort=true) {
+
+  if (code != cudaSuccess) {
+    fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+    if (abort) exit(code);
+  }
+}
+
+/*
+ * use basic formula to compute cost of a permuation 
+ */
+__device__ int initCost(int *d_flows, int *d_dist, int *d_sol, int nsize, int tidx) {
+  int calcost = 0;
+  int index = tidx * nsize;
+  for(int i = 0; i < nsize - 1; i++) {
+    for(int j = i + 1; j < nsize; j++)
+      calcost = calcost 
+	+ (d_flows[(d_sol[index + i] - 1) * nsize + (d_sol[index + j] - 1)]) 
+	* d_dist[i * nsize  + j];
+  }
+  for(int k = 1; k < nsize; k++) {
+    for(int l = 0; l < k;l++)
+      calcost = calcost 
+	+ d_flows[(d_sol[index + k] - 1) * nsize + (d_sol[index + l]- 1)] 
+	* d_dist[k * nsize + l];	
+  }
+  return calcost;
+}
+
+/*
+ * compute cost of a permutation based on Burkard 
+ */
+__device__ int neighborCost(int *d_flows, int *d_dist, int *d_sol, int nsize, int tidx, int i, int j) {
+
+  int offset = tidx * nsize;
+
+  int iUnit = d_sol[offset + i];
+  int jUnit = d_sol[offset + j];
+
+  int ccost = 0, gcost = 0, hcost = 0;
+
+  for(int k = 0; k < nsize; k++) {
+    int kUnit = d_sol[offset + k];
+    if (k != i && k != j)  {
+      gcost = (d_dist[j * nsize + k] - d_dist[i * nsize + k]) *
+	(d_flows[(iUnit - 1) * nsize + (kUnit - 1)] - d_flows[(jUnit-1) * nsize + (kUnit - 1)]); 
+      hcost = (d_dist[k * nsize + j] - d_dist[k * nsize + i]) * 
+	(d_flows[(kUnit - 1) * nsize + (iUnit - 1)] - d_flows[(kUnit - 1) * nsize + (jUnit - 1)]);
+      ccost = ccost + (gcost + hcost);
+    }
+  }
+  return ccost;
+}
+
+
+__device__ bool notTabu(int *sol, int *tabulist, int size, int tidx) {
+
+  bool match = false;
+  for (int i = 0; i < TABULISTSIZE; i++) {
+    match = true;
+    int offset = tidx * (TABULISTSIZE * size);
+    for (int j = 0; j < size; j++)  {
+      if (sol[j] != tabulist[offset + j]) {
+	match = false; 
+	break;
+      }
+      if (match)
+	return match;
+    }
+  }
+  return match;
+}
+/* 
+ *   copy src permutation to dest permutation 
+ */
+__device__ void copy(int *dest, int *src, int size, int tidx) {
+  int offset = tidx * size;
+  for(int i = 0; i < size; i++)
+    dest[offset + i] = src[offset + i];
+  return;
+}
+
+/* 
+ * swap units 
+ */
+__device__ void swap(int *a,int *b) {
+  int temp=0;
+  temp = *a;
+  *a = *b;
+  *b = temp;
+}
+
+__global__ void tabu(int *d_dist,int *d_flows,int *d_sol, int nsize, int row,
+		     int *d_result,int *d_bestsofar,int *d_bestcostsofar,int *d_newarray, int *tabulist) {	
+
+
+  int tidx = threadIdx.x + blockDim.x * blockIdx.x;
+
+  int tabuCount = 0;
+
+  // number of inital solutions should equal number of threads 
+  // if tidx > number of solutions, then something is wrong 
+  if (tidx >= row) 
+    return; 
+
+  int index = tidx * nsize;
+  int dcost = 0, ecost = 0;
+  int delta = 0;
+  int tcost;
+  
+  // calculate cost of initial solution
+  d_result[tidx] = initCost(d_flows, d_dist, d_sol, nsize, tidx);
+  d_bestcostsofar[tidx] = d_result[tidx];
+  copy(d_bestsofar,d_sol,nsize,tidx);
+
+  // search maxiters neighborhoods 
+  for(int n = 0; n < nsize; n++) {	
+
+    // loop-nest determines number of neighboring permuations evaluated 
+    // for size = n, number of evals = (n - 1) + (n - 2) + (n - 3) + ... + 1 = n(n + 1)/2
+    for(int k = 0; k < nsize; k++) { 				
+      for(int j = k + 1; j < nsize; j++) {
+	
+	// generate neighboring permuation by swapping a pair of units 
+	copy(d_newarray, d_sol, nsize, tidx);
+	swap(&d_newarray[tidx * nsize + k], &d_newarray[tidx * nsize + j]);
+
+       	if (!notTabu(d_newarray, tabulist, nsize, tidx)) {
+	  int kUnit = d_sol[index + k] - 1;
+	  int jUnit = d_sol[index + j] - 1;
+	  
+	  // calculate cost of neighbor
+	  dcost = (d_dist[j * nsize + k] - d_dist[k * nsize + j]) 
+	    * (d_flows[kUnit * nsize + jUnit] - d_flows[jUnit * nsize + kUnit]);
+	  
+	  ecost = (d_dist[j * nsize + j] - d_dist[k * nsize + k])
+	    * (d_flows[kUnit * nsize + kUnit] - d_flows[jUnit * nsize + jUnit]);
+	  
+	  delta = dcost + ecost + neighborCost(d_flows, d_dist, d_sol, nsize, tidx, k, j);
+	  tcost = d_result[tidx] + delta;
+	  
+	  // update results if a permuation with lower cost is found
+	  if(tcost < d_bestcostsofar[tidx]) {	
+	    d_bestcostsofar[tidx] = tcost;
+	    copy(d_bestsofar, d_newarray, nsize, tidx);
+	  }
+	}
+      } 
+    } 
+      
+    // place best solution in tabu list 
+    int offset = tidx * TABULISTSIZE * nsize;
+    for (int i = 0; i < nsize; i++)
+      tabulist[offset + i] = d_bestsofar[tidx * nsize + i];
+    tabuCount++;
+
+    if (tabuCount == nsize) 
+      tabuCount = 0;
+
+    // best solution is center of next neighborhood
+    copy(d_sol, d_bestsofar, nsize, tidx);
+    d_result[tidx] = d_bestcostsofar[tidx];
+  }
+
+  return;
+}
+
+
+int main(int argc,char *argv[]) {
+
+#ifdef PROFILE
+  clock_t cpu_startTime, cpu_endTime; 
+  double cpu_ElapseTime=0;
+
+  cpu_startTime = clock();
+#endif
+
+  if (argc != 4) {
+    cout << "usage: " << endl;
+    cout << "\t./2opt datafile solns randseed" << endl;
+    exit(1);
+  }
+
+#ifdef DEBUG 
+  cout <<"input file name: "<< argv[1] << endl; 
+  cout <<"initial solutions: " << argv[2] << endl;
+  cout <<"seed value: " << argv[3] << endl;
+#endif 
+
+  string filename = argv[1];
+  int solns = atoi(argv[2]);
+  int iseed = atoi(argv[3]);
+
+  // read data from file 
+  int size;
+  int **array;
+  readData(filename, &array, &size);
+ 
+  // split and flatten matrix
+  int *h_flows, *h_dist;
+  splitAndFlattenInt(&h_flows, &h_dist, array, size);
+
+#ifdef DEBUG
+  cout << "problem size:" << size << endl;						
+  printFlattenedArray(h_dist, size, size, "distances:");
+  printFlattenedArray(h_flows, size, size, "flows:");
+#endif
+
+  if (iseed == 0) 
+    srand(time(NULL));
+  else
+    srand(iseed);
+
+  int *h_sol;
+  genInitSolutions(&h_sol, size, solns);
+
+  // tabulist = (int**) malloc(solns * TABULISTSIZE * sizeof(int*));
+  // for (int i = 0; i < solns * TABULISTSIZE; i++)
+  //   tabulist[i] = (int*) malloc(size * sizeof(int));
+  
+
+#ifdef DEBUG
+  printFlattenedArray(h_sol, size, size, "initial solutions:");
+#endif
+
+#ifdef PROFILE
+  cudaEvent_t start , stop;
+  float ctime;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  cudaEventRecord(start,0);
+#endif
+
+  // allocate GPU memory
+  int *d_result = NULL;
+  int *d_bestsofar = NULL, *d_bestcostsofar = NULL, *d_newarray = NULL;
+  int *d_dist = NULL,*d_flows = NULL ,*d_sol = NULL;
+  int *d_tabulist = NULL;
+
+  gpuErrchk(cudaMalloc((void **) &d_tabulist, solns * TABULISTSIZE * size * sizeof(int)));
+  gpuErrchk(cudaMalloc((void **) &d_bestcostsofar, solns * sizeof(int)));
+  gpuErrchk(cudaMalloc((void **) &d_bestsofar, solns * size * sizeof(int)));
+  gpuErrchk(cudaMalloc((void **) &d_newarray, solns * size * sizeof(int)));
+  gpuErrchk(cudaMalloc((void **) &d_result, solns * sizeof(int)));
+  gpuErrchk(cudaMalloc((void **) &d_dist, size * size * sizeof(int)));
+  gpuErrchk(cudaMalloc((void **) &d_flows, size * size * sizeof(int)));
+  gpuErrchk(cudaMalloc((void **) &d_sol, solns * size * sizeof(int)));
+
+  // allocated CPU memory
+  int *h_result = (int *) malloc(solns * sizeof(int));
+  int *h_bestsofar = (int *) malloc(solns * size * sizeof(int));
+  int *h_bestcostsofar = (int *) malloc(solns * sizeof(int));
+
+  // copy host data to device 	
+  gpuErrchk(cudaMemcpy(d_dist,h_dist,size*size*sizeof(int),cudaMemcpyHostToDevice));
+  gpuErrchk(cudaMemcpy(d_flows,h_flows,size*size*sizeof(int),cudaMemcpyHostToDevice));
+  gpuErrchk(cudaMemcpy(d_sol,h_sol,solns*size*sizeof(int),cudaMemcpyHostToDevice));
+
+  // determine thread configurations 
+  int threadsPerBlock = 1024;
+  int blockPerGrid = (solns + threadsPerBlock - 1) / threadsPerBlock;
+
+#if DEBUG 
+  cout << "blocks: " << blockPerGrid << " " << endl;
+  cout << "threads: " << threadsPerBlock << " " << endl;
+#endif
+
+  tabu<<< blockPerGrid, threadsPerBlock >>>(d_dist, d_flows, d_sol, size, solns, 
+					    d_result, d_bestsofar, d_bestcostsofar, d_newarray, d_tabulist);
+
+  // copy device data to host
+  gpuErrchk(cudaPeekAtLastError());
+  gpuErrchk(cudaMemcpy(h_bestcostsofar, d_bestcostsofar, solns * sizeof(int),cudaMemcpyDeviceToHost));
+  gpuErrchk(cudaMemcpy(h_bestsofar, d_bestsofar, solns * size * sizeof(int),cudaMemcpyDeviceToHost)); 
+
+#ifdef PROFILE
+  cudaEventRecord(stop,0);
+  cudaEventSynchronize(start);
+  cudaEventSynchronize(stop);
+#endif 
+
+#ifdef DEBUG  
+  printFlattenedArray(h_bestsofar, solns, size, "Best permutations");
+  printRegularArray(h_bestcostsofar, solns, "Best costs:");
+#endif
+
+  // find the best among all the solutions resturneed 
+  int minIndex = 0;
+  int minCost = findMin(h_bestcostsofar, solns, &minIndex);
+
+  //  print results
+  cout << "problem size: " << size << endl;
+  cout << "best cost: " << minCost << endl;
+  cout << "best solution: " ;
+  for(int i = 0; i < size; i++)
+    cout << h_bestsofar[minIndex * size + i] << " ";
+  cout << endl;
+
+#ifdef PROFILE
+  cpu_endTime = clock();
+  cpu_ElapseTime= ((cpu_endTime - cpu_startTime) / (double) CLOCKS_PER_SEC);
+
+  fprintf(stdout, "total exec time (s):\t %2.2f\n", cpu_ElapseTime); 
+  cudaEventElapsedTime(&ctime, start , stop);
+  fprintf(stdout, "kernel exec:\t %2.2f\n", (ctime / 1000));
+
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+#endif
+
+  free(array);
+  free(h_dist);
+  free(h_flows);
+  free(h_sol);
+  free(h_result);
+  free(h_bestsofar);
+  free(h_bestcostsofar);
+  cudaFree(d_dist);
+  cudaFree(d_flows);
+  cudaFree(d_sol);
+  cudaFree(d_bestcostsofar);
+  cudaFree(d_newarray);
+  cudaFree(d_result);
+  cudaFree(d_bestsofar);
+
+  return 0;
+}
