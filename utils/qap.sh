@@ -22,15 +22,20 @@ solns=$3
 hoods=$4
 restarts=$5
 
+outpath=`pwd`
 DATAPATH=../datasets
-outfile=../perf.dat
+outfile=${outpath}/perf.dat
+
+
+[ "$QAPHOME" ] || { echo "QAPHOME env var not defined. Set QAPHOME to install dir"; exit 0;}
 
 rm -rf ${outfile}
 
-[ -x src ] || { echo "qap.sh must be run in parent of src directory"; exit 0;}
+srcdir=${QAPHOME}/src
 
+[ -x ${srcdir} ] || { echo "could not find src directory"; exit 0;}
 
-cd src 
+pushd ${srcdir} &> /dev/null
 i=0
 while [ $i -lt ${restarts} ]; do 
   RANDSEED=$RANDOM 
@@ -46,5 +51,6 @@ while [ $i -lt ${restarts} ]; do
 
 	i=$(($i+1))
 done
-cd ../
+
+popd &> /dev/null
 

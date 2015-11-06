@@ -15,7 +15,16 @@ To install, in the top-level directory type
 
    make
 
-add the bin directory to your PATH if you want to perfom experiments
+set QAPHOME to be the install directory
+
+   export QAPHOME=path_to_install_dir
+
+add ${QAPHOME}/bin to your PATH 
+
+   export PATH=$PATH:${QAPHOME}/bin
+
+add above to your .bashrc, so that you don't have to type the above at every
+login
 
 
 
