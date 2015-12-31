@@ -20,6 +20,10 @@ tai100b=1185996137
 lipa70a=169755
 lipa90=360630
 
+
+[ $data = "tai35a" ] && { echo $tai35a $cost | awk '{ printf "%3.2f%%\n", (($2 - $1)/$1 * 100) }'; exit 0; }
+[ $data = "tai35b" ] && { echo $tai35b $cost | awk '{ printf "%3.2f%%\n", (($2 - $1)/$1 * 100) }'; exit 0; }
+
 if [ $data = "tai30a" ]; then 
    echo $tai30a $cost | awk '{ printf "%3.2f%%\n", (($2 - $1)/$1 * 100) }'
 fi

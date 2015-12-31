@@ -29,17 +29,17 @@ outfile=${outpath}/perf.dat
 
 [ "$QAPHOME" ] || { echo "QAPHOME env var not defined. Set QAPHOME to install dir"; exit 0;}
 
-rm -rf ${outfile}
-
 srcdir=${QAPHOME}/src
 
 [ -x ${srcdir} ] || { echo "could not find src directory"; exit 0;}
 
 pushd ${srcdir} &> /dev/null
 i=0
+sum_gap=0
+sum_time=0
 while [ $i -lt ${restarts} ]; do 
   RANDSEED=$RANDOM 
-  echo -n $prog $datafile $RANDSEED " " >> ${outfile}
+#  echo -n $prog $datafile $RANDSEED " " >> ${outfile}
   vals=`./$prog $DATAPATH/$datafile.txt $solns $RANDSEED $hoods\
         | grep -E "cost|kernel" | awk '{printf $3 " "}'`
 
@@ -47,10 +47,16 @@ while [ $i -lt ${restarts} ]; do
   time=`echo $vals | awk '{print $2}'`
   gap=`../utils/calc_gap.sh $datafile $cost`
 
-  echo $gap $time >> ${outfile}
+#  echo $gap $time >> ${outfile}
 
+	sum_gap=`echo ${sum_gap} $gap | awk '{printf "%3.2f", $1 + $2}'`
+	sum_time=`echo ${sum_time} $time | awk '{printf "%3.2f", $1 + $2}'`
+	
 	i=$(($i+1))
 done
 
+gap=`echo ${sum_gap} $i | awk '{printf "%3.2f", $1/$2}'`
+time=`echo ${sum_time} $i | awk '{printf "%3.2f", $1/$2}'`
+echo ${restarts} $gap $time >> ${outfile}
 popd &> /dev/null
 
